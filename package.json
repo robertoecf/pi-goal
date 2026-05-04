@@ -1,6 +1,6 @@
 {
   "name": "pi-goal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Persistent autonomous goals for pi — /goal loops until complete, paused, or budget-limited",
   "type": "commonjs",
   "keywords": [
@@ -21,7 +21,8 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
   },
   "scripts": {
     "check": "pi --no-extensions -e ./.pi/extensions/pi-goal/index.ts --list-models __pi_goal_load_check__",

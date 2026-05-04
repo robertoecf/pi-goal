@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Box, Spacer, Text } from "@mariozechner/pi-tui";
 
 const CUSTOM_TYPE = "pi-goal";
+const EVENT_TYPE = "pi-goal-event";
 
 type GoalStatus = "active" | "paused" | "budget_limited" | "complete";
 
@@ -16,9 +18,12 @@ type GoalState = {
 	updatedAt: number;
 };
 
+type GoalEventKind = "active" | "continuation" | "paused" | "resumed" | "cleared" | "budget_limited" | "complete";
+
 let goal: GoalState | null = null;
 let activeTurnStartedAt: number | null = null;
 let continuationQueued = false;
+let pendingControlPrompt: string | null = null;
 
 function parseTokenBudget(input: string): { objective: string; tokenBudget: number | null; error?: string } {
 	const match = input.match(/(?:^|\s)--tokens(?:=|\s+)([0-9]+(?:\.[0-9]+)?\s*[kKmM]?)(?:\s|$)/);
@@ -59,6 +64,58 @@ function statusLine(state: GoalState | null): string | undefined {
 	if (state.status === "paused") return "Goal paused (/goal resume)";
 	if (state.status === "budget_limited") return state.tokenBudget ? `Goal unmet${budget}` : "Goal abandoned";
 	return `Goal achieved${budget}`;
+}
+
+function goalUsage(state: GoalState): string {
+	if (state.tokenBudget != null) return `${formatTokens(state.tokensUsed)} / ${formatTokens(state.tokenBudget)} tokens`;
+	return formatElapsed(state.timeUsedSeconds);
+}
+
+function tokenDeltaFromUsage(usage: any): number {
+	if (!usage) return 0;
+	if (typeof usage.totalTokens === "number") return Math.max(0, usage.totalTokens);
+	return Math.max(0, (Number(usage.input) || 0) + (Number(usage.output) || 0));
+}
+
+function truncateObjective(objective: string, max = 96): string {
+	const singleLine = objective.replace(/\s+/g, " ").trim();
+	return singleLine.length > max ? `${singleLine.slice(0, max - 1)}…` : singleLine;
+}
+
+function goalEventStatus(kind: GoalEventKind): string {
+	const labels: Record<GoalEventKind, string> = {
+		active: "active",
+		continuation: "continuing",
+		paused: "paused",
+		resumed: "resumed",
+		cleared: "cleared",
+		budget_limited: "budget reached",
+		complete: "achieved",
+	};
+	return labels[kind];
+}
+
+function emitGoalEvent(
+	pi: ExtensionAPI,
+	kind: GoalEventKind,
+	state: GoalState | null,
+	content?: string,
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+) {
+	const text = content ?? `Goal ${goalEventStatus(kind)} (ctrl+o to expand)`;
+	pi.sendMessage(
+		{
+			customType: EVENT_TYPE,
+			content: text,
+			display: true,
+			details: {
+				kind,
+				goal: state,
+				timestamp: Date.now(),
+			},
+		},
+		options,
+	);
 }
 
 function latestGoalFromSession(ctx: ExtensionContext): GoalState | null {
@@ -131,25 +188,49 @@ The system has marked the goal as budget_limited, so do not start new substantiv
 Do not call update_goal unless the goal is actually complete.`;
 }
 
-function maybeQueueContinuation(pi: ExtensionAPI, state: GoalState) {
+function queueContinuation(pi: ExtensionAPI, state: GoalState) {
 	if (continuationQueued || state.status !== "active") return;
 	continuationQueued = true;
 	queueMicrotask(() => {
 		continuationQueued = false;
 		if (!goal || goal.id !== state.id || goal.status !== "active") return;
-		pi.sendMessage(
-			{
-				customType: CUSTOM_TYPE,
-				content: continuationPrompt(goal),
-				display: false,
-				details: { kind: "goal-continuation", goalId: goal.id },
-			},
-			{ triggerTurn: true, deliverAs: "followUp" },
-		);
+		pendingControlPrompt = continuationPrompt(goal);
+		emitGoalEvent(pi, "continuation", goal, undefined, { triggerTurn: true, deliverAs: "followUp" });
 	});
 }
 
 export default function piGoal(pi: ExtensionAPI) {
+	pi.registerMessageRenderer(EVENT_TYPE, (message, { expanded }, theme) => {
+		const details = message.details as { kind?: GoalEventKind; goal?: GoalState | null; timestamp?: number } | undefined;
+		const kind = details?.kind ?? "continuation";
+		const state = details?.goal ?? null;
+		const box = new Box(1, 1, (value) => theme.bg("customMessageBg", value));
+		box.addChild(new Text(theme.fg("customMessageLabel", theme.bold("Goal")), 0, 0));
+		box.addChild(new Spacer(1));
+		if (!expanded) {
+			box.addChild(new Text(`${theme.fg("customMessageText", goalEventStatus(kind))} ${theme.fg("dim", "(ctrl+o to expand)")}`, 0, 0));
+			return box;
+		}
+		const lines = [
+			`${theme.fg("dim", "Status: ")}${theme.fg("customMessageText", goalEventStatus(kind))}`,
+		];
+		if (state) {
+			lines.push(`${theme.fg("dim", "Goal: ")}${theme.fg("customMessageText", state.objective)}`);
+			lines.push(`${theme.fg("dim", "Usage: ")}${theme.fg("customMessageText", goalUsage(state))}`);
+		}
+		box.addChild(new Text(lines.join("\n"), 0, 0));
+		return box;
+	});
+
+	pi.on("before_agent_start", (event) => {
+		const prompt = pendingControlPrompt;
+		pendingControlPrompt = null;
+		if (!prompt) return;
+		return {
+			systemPrompt: `${event.systemPrompt}\n\n${prompt}`,
+		};
+	});
+
 	pi.registerTool({
 		name: "get_goal",
 		label: "Get Goal",
@@ -196,6 +277,7 @@ export default function piGoal(pi: ExtensionAPI) {
 			const now = Date.now();
 			const next: GoalState = { ...goal, status: "complete", updatedAt: now };
 			persist(pi, ctx, next);
+			emitGoalEvent(pi, "complete", next);
 			return {
 				content: [{ type: "text", text: JSON.stringify({ goal: next, remainingTokens: next.tokenBudget == null ? null : Math.max(0, next.tokenBudget - next.tokensUsed) }, null, 2) }],
 				details: { goal: next },
@@ -221,8 +303,9 @@ export default function piGoal(pi: ExtensionAPI) {
 			}
 
 			if (trimmed === "clear") {
+				const previous = goal;
 				persist(pi, ctx, null);
-				ctx.ui.notify("Goal cleared", "info");
+				emitGoalEvent(pi, "cleared", previous);
 				return;
 			}
 
@@ -234,8 +317,8 @@ export default function piGoal(pi: ExtensionAPI) {
 				const status: GoalStatus = trimmed === "pause" ? "paused" : "active";
 				const next = { ...goal, status, updatedAt: now };
 				persist(pi, ctx, next);
-				ctx.ui.notify(statusLine(next) ?? "Goal updated", "info");
-				if (status === "active" && ctx.isIdle()) maybeQueueContinuation(pi, next);
+				emitGoalEvent(pi, status === "active" ? "resumed" : "paused", next);
+				if (status === "active" && ctx.isIdle()) queueContinuation(pi, next);
 				return;
 			}
 
@@ -264,15 +347,40 @@ export default function piGoal(pi: ExtensionAPI) {
 				updatedAt: now,
 			};
 			persist(pi, ctx, next);
-			ctx.ui.notify(`Goal active: ${parsed.objective}`, "success");
-			if (ctx.isIdle()) maybeQueueContinuation(pi, next);
+			if (ctx.isIdle()) {
+				pendingControlPrompt = continuationPrompt(next);
+				emitGoalEvent(pi, "active", next, undefined, { triggerTurn: true });
+			} else {
+				emitGoalEvent(pi, "active", next);
+			}
 		},
 	});
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		goal = latestGoalFromSession(ctx);
+		pendingControlPrompt = null;
+		continuationQueued = false;
+		activeTurnStartedAt = null;
+		if (goal?.status === "active" && event.reason === "reload") {
+			goal = { ...goal, status: "paused", updatedAt: Date.now() };
+			persist(pi, ctx, goal);
+			emitGoalEvent(
+				pi,
+				"paused",
+				goal,
+				`Ⅱ goal paused after reload: ${truncateObjective(goal.objective)}\nUse /goal resume to continue, or /goal clear to stop.`,
+			);
+			return;
+		}
 		ctx.ui.setStatus(CUSTOM_TYPE, statusLine(goal) ?? "");
-		if (goal?.status === "active" && ctx.isIdle()) maybeQueueContinuation(pi, goal);
+		if (goal?.status === "active") {
+			emitGoalEvent(
+				pi,
+				"active",
+				goal,
+				`⚑ goal restored: ${truncateObjective(goal.objective)}\nUse /goal pause to stop continuation, or /goal clear to remove it.`,
+			);
+		}
 	});
 
 	pi.on("turn_start", (_event, _ctx) => {
@@ -283,8 +391,7 @@ export default function piGoal(pi: ExtensionAPI) {
 		if (!goal || goal.status !== "active") return;
 		const elapsed = activeTurnStartedAt ? Math.max(0, Math.round((Date.now() - activeTurnStartedAt) / 1000)) : 0;
 		activeTurnStartedAt = null;
-		const usage = (event.message as any)?.usage;
-		const tokenDelta = Math.max(0, Number(usage?.totalTokens ?? usage?.input + usage?.output ?? 0) || 0);
+		const tokenDelta = tokenDeltaFromUsage((event.message as any)?.usage);
 		let next: GoalState = {
 			...goal,
 			tokensUsed: goal.tokensUsed + tokenDelta,
@@ -296,16 +403,17 @@ export default function piGoal(pi: ExtensionAPI) {
 		}
 		persist(pi, ctx, next);
 		if (next.status === "budget_limited") {
-			pi.sendMessage(
-				{ customType: CUSTOM_TYPE, content: budgetLimitPrompt(next), display: false, details: { kind: "goal-budget-limit", goalId: next.id } },
-				{ triggerTurn: true, deliverAs: "followUp" },
-			);
+			pendingControlPrompt = budgetLimitPrompt(next);
+			emitGoalEvent(pi, "budget_limited", next, undefined, { triggerTurn: true, deliverAs: "followUp" });
 		}
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
-		if (goal?.status === "active" && ctx.isIdle() && !ctx.hasPendingMessages()) {
-			maybeQueueContinuation(pi, goal);
-		}
+		const currentGoal = goal;
+		if (!currentGoal || currentGoal.status !== "active" || ctx.hasPendingMessages()) return;
+		setTimeout(() => {
+			if (!goal || goal.id !== currentGoal.id || goal.status !== "active") return;
+			queueContinuation(pi, goal);
+		}, 0);
 	});
 }

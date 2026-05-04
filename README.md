@@ -27,7 +27,9 @@ pi install git:github.com/Michaelliv/pi-goal
 /goal clear
 ```
 
-When a goal is active, the extension injects a hidden continuation prompt after the agent finishes. The same Pi agent keeps running normal turns in the same session context until it calls `update_goal({ status: "complete" })`, the user pauses/clears it, or the token budget is reached.
+When a goal is active, the extension shows compact visible lifecycle markers like `Goal active` and `Goal continuing`; expand them with `ctrl+o` to inspect the objective and usage. The actual continuation instructions are injected into the next turn's system prompt, so the full prompt does not clutter the transcript.
+
+The same Pi agent keeps running normal turns in the same session context until it calls `update_goal({ status: "complete" })`, the user pauses/clears it, or the token budget is reached. Reloading Pi pauses an active goal instead of silently resuming it; use `/goal resume` to continue.
 
 ## What it adds
 
@@ -45,8 +47,8 @@ When a goal is active, the extension injects a hidden continuation prompt after 
 ```text
 /goal <objective>
   -> persist goal in the current Pi session
-  -> show footer status
-  -> inject hidden continuation message
+  -> show compact Goal marker and footer status
+  -> inject hidden continuation instructions into the next system prompt
   -> trigger an agent turn
   -> account time/tokens on turn_end
   -> queue another continuation on agent_end while active
