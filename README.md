@@ -7,7 +7,7 @@ Persistent autonomous goals for [pi](https://github.com/badlogic/pi-mono).
 ## Install
 
 ```bash
-pi install npm:@miclivs/pi-goal
+pi install npm:pi-goal
 ```
 
 Or from git:
