@@ -22,6 +22,7 @@ type GoalEventKind = "active" | "continuation" | "paused" | "resumed" | "cleared
 
 let goal: GoalState | null = null;
 let statusBarEnabled = true;
+let autoContinueOnReload = true;
 let activeTurnStartedAt: number | null = null;
 let continuationQueued = false;
 let pendingControlPrompt: string | null = null;
@@ -123,7 +124,7 @@ function emitGoalEvent(
 	);
 }
 
-function latestStateFromSession(ctx: ExtensionContext): { goal: GoalState | null; statusBarEnabled: boolean } {
+function latestStateFromSession(ctx: ExtensionContext): { goal: GoalState | null; statusBarEnabled: boolean; autoContinueOnReload: boolean } {
 	const entries = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries();
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i] as any;
@@ -131,10 +132,11 @@ function latestStateFromSession(ctx: ExtensionContext): { goal: GoalState | null
 			return {
 				goal: entry.data?.goal ?? null,
 				statusBarEnabled: entry.data?.statusBarEnabled ?? true,
+				autoContinueOnReload: entry.data?.autoContinueOnReload ?? true,
 			};
 		}
 	}
-	return { goal: null, statusBarEnabled: true };
+	return { goal: null, statusBarEnabled: true, autoContinueOnReload: true };
 }
 
 function updateStatusBar(ctx: ExtensionContext) {
@@ -143,12 +145,12 @@ function updateStatusBar(ctx: ExtensionContext) {
 
 function persist(pi: ExtensionAPI, ctx: ExtensionContext, next: GoalState | null) {
 	goal = next;
-	pi.appendEntry(CUSTOM_TYPE, { goal: next, statusBarEnabled });
+	pi.appendEntry(CUSTOM_TYPE, { goal: next, statusBarEnabled, autoContinueOnReload });
 	updateStatusBar(ctx);
 }
 
 function persistSettings(pi: ExtensionAPI, ctx: ExtensionContext) {
-	pi.appendEntry(CUSTOM_TYPE, { goal, statusBarEnabled });
+	pi.appendEntry(CUSTOM_TYPE, { goal, statusBarEnabled, autoContinueOnReload });
 	updateStatusBar(ctx);
 }
 
@@ -304,7 +306,7 @@ export default function piGoal(pi: ExtensionAPI) {
 	pi.registerCommand("goal", {
 		description: "Set, view, pause, resume, clear, or configure a long-running goal",
 		getArgumentCompletions: (prefix) => {
-			const values = ["pause", "resume", "clear", "status", "statusbar", "statusbar on", "statusbar off"];
+			const values = ["pause", "resume", "clear", "status", "statusbar", "statusbar on", "statusbar off", "reload", "reload auto", "reload passive"];
 			const filtered = values.filter((value) => value.startsWith(prefix));
 			return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
 		},
@@ -314,7 +316,7 @@ export default function piGoal(pi: ExtensionAPI) {
 
 			if (!trimmed || trimmed === "status") {
 				if (!goal) ctx.ui.notify("Usage: /goal [--tokens 50k] <objective>", "info");
-				else ctx.ui.notify(`${statusLine(goal)}\nObjective: ${goal.objective}\nStatus bar: ${statusBarEnabled ? "on" : "off"}`, "info");
+				else ctx.ui.notify(`${statusLine(goal)}\nObjective: ${goal.objective}\nStatus bar: ${statusBarEnabled ? "on" : "off"}\nReload: ${autoContinueOnReload ? "auto-continue" : "passive"}`, "info");
 				return;
 			}
 
@@ -323,6 +325,14 @@ export default function piGoal(pi: ExtensionAPI) {
 				statusBarEnabled = value === "on" ? true : value === "off" ? false : !statusBarEnabled;
 				persistSettings(pi, ctx);
 				ctx.ui.notify(`Goal status bar ${statusBarEnabled ? "enabled" : "disabled"}.`, "info");
+				return;
+			}
+
+			if (trimmed === "reload" || trimmed === "reload auto" || trimmed === "reload passive") {
+				const [, value] = trimmed.split(/\s+/, 2);
+				autoContinueOnReload = value === "auto" ? true : value === "passive" ? false : !autoContinueOnReload;
+				persistSettings(pi, ctx);
+				ctx.ui.notify(`Goal reload ${autoContinueOnReload ? "set to auto-continue" : "set to passive (no auto-continue)"}.`, "info");
 				return;
 			}
 
@@ -384,12 +394,13 @@ export default function piGoal(pi: ExtensionAPI) {
 		const restored = latestStateFromSession(ctx);
 		goal = restored.goal;
 		statusBarEnabled = restored.statusBarEnabled;
+		autoContinueOnReload = restored.autoContinueOnReload;
 		pendingControlPrompt = null;
 		continuationQueued = false;
 		activeTurnStartedAt = null;
 		updateStatusBar(ctx);
 		if (goal?.status === "active") {
-			if (ctx.isIdle()) {
+			if (autoContinueOnReload && ctx.isIdle()) {
 				pendingControlPrompt = continuationPrompt(goal);
 				emitGoalEvent(
 					pi,
