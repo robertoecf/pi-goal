@@ -75,7 +75,11 @@ function goalUsage(state: GoalState): string {
 function tokenDeltaFromUsage(usage: any): number {
 	if (!usage) return 0;
 	if (typeof usage.totalTokens === "number") return Math.max(0, usage.totalTokens);
-	return Math.max(0, (Number(usage.input) || 0) + (Number(usage.output) || 0));
+	const input = Number(usage.input) || 0;
+	const output = Number(usage.output) || 0;
+	const cacheRead = Number(usage.cacheRead) || 0;
+	const cacheWrite = Number(usage.cacheWrite) || 0;
+	return Math.max(0, input + output + cacheRead + cacheWrite);
 }
 
 function truncateObjective(objective: string, max = 96): string {
@@ -376,32 +380,32 @@ export default function piGoal(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("session_start", (event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		const restored = latestStateFromSession(ctx);
 		goal = restored.goal;
 		statusBarEnabled = restored.statusBarEnabled;
 		pendingControlPrompt = null;
 		continuationQueued = false;
 		activeTurnStartedAt = null;
-		if (goal?.status === "active" && event.reason === "reload") {
-			goal = { ...goal, status: "paused", updatedAt: Date.now() };
-			persist(pi, ctx, goal);
-			emitGoalEvent(
-				pi,
-				"paused",
-				goal,
-				`Ⅱ goal paused after reload: ${truncateObjective(goal.objective)}\nUse /goal resume to continue, or /goal clear to stop.`,
-			);
-			return;
-		}
 		updateStatusBar(ctx);
 		if (goal?.status === "active") {
-			emitGoalEvent(
-				pi,
-				"active",
-				goal,
-				`⚑ goal restored: ${truncateObjective(goal.objective)}\nUse /goal pause to stop continuation, or /goal clear to remove it.`,
-			);
+			if (ctx.isIdle()) {
+				pendingControlPrompt = continuationPrompt(goal);
+				emitGoalEvent(
+					pi,
+					"active",
+					goal,
+					`⚑ goal restored: ${truncateObjective(goal.objective)}\nContinuing automatically…`,
+					{ triggerTurn: true },
+				);
+			} else {
+				emitGoalEvent(
+					pi,
+					"active",
+					goal,
+					`⚑ goal restored: ${truncateObjective(goal.objective)}\nUse /goal pause to stop continuation, or /goal clear to remove it.`,
+				);
+			}
 		}
 	});
 

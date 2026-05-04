@@ -32,7 +32,7 @@ pi install git:github.com/Michaelliv/pi-goal
 
 When a goal is active, the extension shows compact visible lifecycle markers like `Goal active` and `Goal continuing`; expand them with `ctrl+o` to inspect the objective and usage. The actual continuation instructions are injected into the next turn's system prompt, so the full prompt does not clutter the transcript.
 
-The same Pi agent keeps running normal turns in the same session context until it calls `update_goal({ status: "complete" })`, the user pauses/clears it, or the token budget is reached. Reloading Pi pauses an active goal instead of silently resuming it; use `/goal resume` to continue.
+The same Pi agent keeps running normal turns in the same session context until it calls `update_goal({ status: "complete" })`, the user pauses/clears it, or the token budget is reached. Active goals survive reloads and resume automatically on the next turn.
 
 ## What it adds
 
