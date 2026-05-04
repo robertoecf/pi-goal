@@ -1,5 +1,7 @@
 # pi-goal
 
+![pi-goal](docs/assets/pi-goal-poster.png)
+
 Persistent autonomous goals for [pi](https://github.com/badlogic/pi-mono).
 
 `pi-goal` adds a `/goal` command and goal tools so Pi can keep working toward a long-running objective until the goal is complete, paused, cleared, or token-budget-limited.
