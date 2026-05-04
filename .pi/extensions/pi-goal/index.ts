@@ -21,6 +21,7 @@ type GoalState = {
 type GoalEventKind = "active" | "continuation" | "paused" | "resumed" | "cleared" | "budget_limited" | "complete";
 
 let goal: GoalState | null = null;
+let statusBarEnabled = true;
 let activeTurnStartedAt: number | null = null;
 let continuationQueued = false;
 let pendingControlPrompt: string | null = null;
@@ -118,22 +119,33 @@ function emitGoalEvent(
 	);
 }
 
-function latestGoalFromSession(ctx: ExtensionContext): GoalState | null {
+function latestStateFromSession(ctx: ExtensionContext): { goal: GoalState | null; statusBarEnabled: boolean } {
 	const entries = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries();
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i] as any;
 		if (entry.type === "custom" && entry.customType === CUSTOM_TYPE) {
-			return entry.data?.goal ?? null;
+			return {
+				goal: entry.data?.goal ?? null,
+				statusBarEnabled: entry.data?.statusBarEnabled ?? true,
+			};
 		}
 	}
-	return null;
+	return { goal: null, statusBarEnabled: true };
+}
+
+function updateStatusBar(ctx: ExtensionContext) {
+	ctx.ui.setStatus(CUSTOM_TYPE, statusBarEnabled ? statusLine(goal) ?? "" : "");
 }
 
 function persist(pi: ExtensionAPI, ctx: ExtensionContext, next: GoalState | null) {
 	goal = next;
-	pi.appendEntry(CUSTOM_TYPE, { goal: next });
-	const line = statusLine(next);
-	ctx.ui.setStatus(CUSTOM_TYPE, line ?? "");
+	pi.appendEntry(CUSTOM_TYPE, { goal: next, statusBarEnabled });
+	updateStatusBar(ctx);
+}
+
+function persistSettings(pi: ExtensionAPI, ctx: ExtensionContext) {
+	pi.appendEntry(CUSTOM_TYPE, { goal, statusBarEnabled });
+	updateStatusBar(ctx);
 }
 
 function continuationPrompt(state: GoalState): string {
@@ -286,9 +298,9 @@ export default function piGoal(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("goal", {
-		description: "Set, view, pause, resume, or clear a long-running goal",
+		description: "Set, view, pause, resume, clear, or configure a long-running goal",
 		getArgumentCompletions: (prefix) => {
-			const values = ["pause", "resume", "clear", "status"];
+			const values = ["pause", "resume", "clear", "status", "statusbar", "statusbar on", "statusbar off"];
 			const filtered = values.filter((value) => value.startsWith(prefix));
 			return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
 		},
@@ -298,7 +310,15 @@ export default function piGoal(pi: ExtensionAPI) {
 
 			if (!trimmed || trimmed === "status") {
 				if (!goal) ctx.ui.notify("Usage: /goal [--tokens 50k] <objective>", "info");
-				else ctx.ui.notify(`${statusLine(goal)}\nObjective: ${goal.objective}`, "info");
+				else ctx.ui.notify(`${statusLine(goal)}\nObjective: ${goal.objective}\nStatus bar: ${statusBarEnabled ? "on" : "off"}`, "info");
+				return;
+			}
+
+			if (trimmed === "statusbar" || trimmed === "statusbar toggle" || trimmed === "statusbar on" || trimmed === "statusbar off") {
+				const [, value] = trimmed.split(/\s+/, 2);
+				statusBarEnabled = value === "on" ? true : value === "off" ? false : !statusBarEnabled;
+				persistSettings(pi, ctx);
+				ctx.ui.notify(`Goal status bar ${statusBarEnabled ? "enabled" : "disabled"}.`, "info");
 				return;
 			}
 
@@ -357,7 +377,9 @@ export default function piGoal(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (event, ctx) => {
-		goal = latestGoalFromSession(ctx);
+		const restored = latestStateFromSession(ctx);
+		goal = restored.goal;
+		statusBarEnabled = restored.statusBarEnabled;
 		pendingControlPrompt = null;
 		continuationQueued = false;
 		activeTurnStartedAt = null;
@@ -372,7 +394,7 @@ export default function piGoal(pi: ExtensionAPI) {
 			);
 			return;
 		}
-		ctx.ui.setStatus(CUSTOM_TYPE, statusLine(goal) ?? "");
+		updateStatusBar(ctx);
 		if (goal?.status === "active") {
 			emitGoalEvent(
 				pi,
